@@ -9,18 +9,17 @@ from signalwire.voice_response import VoiceResponse
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# Récupération des clés secrètes
 try:
-    DB_URL = os.environ['DATABASE_URL']
-    GOOGLE_API_KEY = os.environ['GOOGLE_API_KEY']
+    DB_URL = os.environ.get('DATABASE_URL')
+    GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 except KeyError:
-    print("ERREUR : Il manque des clés dans les Secrets Replit !")
+    print("ERREUR : Il manque des clés dans les Secrets Render !")
 
 # Configuration de Google Gemini
-genai.configure(api_key=GOOGLE_API_KEY)
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 # --- LE CERVEAU (Prompt Système) ---
-# On explique à Gemini comment analyser l'audio
 SYSTEM_PROMPT = """
 Tu es BATI-IA, l'assistant expert pour une entreprise de bâtiment.
 Tu vas recevoir un FICHIER AUDIO d'un appel téléphonique.
@@ -52,14 +51,18 @@ FORMAT DE RÉPONSE OBLIGATOIRE (JSON) :
 }
 """
 
-# --- CONNEXION BDD ---
+# --- CONNEXION BDD (CORRIGÉE & SÉCURISÉE) ---
 def get_db_connection():
-    return psycopg2.connect(DB_URL)
+    url = DB_URL
+    # Correction automatique pour Render qui donne parfois 'postgres://' au lieu de 'postgresql://'
+    if url and url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url)
 
 # --- ROUTES ---
 @app.route('/')
 def home():
-    return "⚡ BATI-SERVEUR (Version Google Gemini 1.5 Flash) en ligne."
+    return "⚡ BATI-SERVEUR (Version Google Gemini 1.5) en ligne."
 
 @app.route('/webhook/incoming', methods=['POST', 'GET'])
 def incoming_call():
@@ -67,14 +70,17 @@ def incoming_call():
     caller_phone = request.values.get('From')
     
     # Vérification BDD (Qui appelle ?)
+    membre = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # On nettoie le numéro (parfois +33, parfois 06...)
         cur.execute("SELECT nom_societe FROM membres WHERE telephone = %s", (caller_phone,))
         membre = cur.fetchone()
         cur.close()
         conn.close()
-    except:
+    except Exception as e:
+        print(f"Erreur Connexion BDD au décrochage : {e}")
         membre = None
 
     if membre:
@@ -91,29 +97,28 @@ def process_audio():
     recording_url = request.values.get('RecordingUrl')
     caller_phone = request.values.get('From')
     
-    # 1. TÉLÉCHARGEMENT DE L'AUDIO (Requis pour Gemini)
-    # On sauvegarde temporairement le fichier
-    audio_filename = "temp_audio.wav"
-    audio_data = requests.get(recording_url).content
-    with open(audio_filename, "wb") as f:
-        f.write(audio_data)
+    reponse_vocale = "Bien reçu." # Valeur par défaut
 
+    # 1. TÉLÉCHARGEMENT DE L'AUDIO
+    audio_filename = "temp_audio.wav"
     try:
-        # 2. INTELLIGENCE GEMINI (Mode Flash)
-        # On charge le modèle
+        audio_data = requests.get(recording_url).content
+        with open(audio_filename, "wb") as f:
+            f.write(audio_data)
+
+        # 2. INTELLIGENCE GEMINI
         model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        # On envoie le fichier audio à Google
         audio_file = genai.upload_file(path=audio_filename)
         
         # On demande l'analyse
         response = model.generate_content([SYSTEM_PROMPT, audio_file])
         
         # 3. TRAITEMENT DE LA RÉPONSE
-        # Nettoyage du JSON (Gemini est parfois bavard avec les balises ```)
         json_text = response.text.replace("```json", "").replace("```", "").strip()
         result = json.loads(json_text)
         
+        reponse_vocale = result.get('reponse_vocale', "C'est noté.")
+
         # 4. SAUVEGARDE EN BDD
         conn = get_db_connection()
         cur = conn.cursor()
@@ -137,14 +142,11 @@ def process_audio():
         cur.close()
         conn.close()
 
-        reponse_vocale = result.get('reponse_vocale', "Bien reçu, c'est noté.")
-
     except Exception as e:
-        print(f"ERREUR GEMINI: {e}")
-        reponse_vocale = "J'ai eu un petit souci technique, mais l'audio est sauvegardé."
+        print(f"ERREUR GENERALE: {e}")
+        reponse_vocale = "J'ai eu un petit souci technique, mais votre message est enregistré."
 
     # 5. NETTOYAGE
-    # On supprime le fichier temporaire pour ne pas encombrer le serveur
     if os.path.exists(audio_filename):
         os.remove(audio_filename)
 
@@ -156,4 +158,5 @@ def process_audio():
     return Response(str(resp), mimetype='text/xml')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    # Sur Render, c'est Gunicorn qui lance l'app, mais ceci est utile pour les tests locaux
+    app.run(host='0.0.0.0', port=10000)
