@@ -6,3 +6,5 @@ signalwire
 google-generativeai
 protobuf==4.25.3
 grpcio
+streamlit
+pandas
