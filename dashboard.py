@@ -20,26 +20,38 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONNEXION BDD ---
-# On utilise la même base de données que le téléphone
+# --- CONNEXION BDD (CORRIGÉE POUR RENDER) ---
 def get_db_connection():
     try:
-        url = st.secrets["DATABASE_URL"]
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
+        # On récupère la variable d'environnement (méthode Render)
+        url = os.environ.get("DATABASE_URL")
+        
+        # NETTOYAGE (Sécurité si l'URL contient encore 'psql' ou des guillemets)
+        if url:
+            url = url.replace("psql ", "").replace('"', "").replace("'", "").strip()
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
+        
         return psycopg2.connect(url)
-    except:
-        st.error("⚠️ Erreur de connexion à la Base de Données.")
+    except Exception as e:
+        # On affiche l'erreur technique discrètement pour le debug
+        st.error(f"⚠️ Erreur technique BDD : {e}")
         return None
 
 # --- BARRE LATÉRALE (MENU) ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2942/2942544.png", width=100)
-    st.title("Bati-Plâtre 57")
+    st.title("🏗️ Bati-Plâtre 57")
     st.write("---")
     menu = st.radio("Navigation", ["📊 Tableau de Bord", "📞 Journal Chantiers", "📝 Devis & Factures", "⚙️ Clients"])
     st.write("---")
-    st.info("🟢 IA Connectée")
+    
+    # Indicateur d'état
+    conn = get_db_connection()
+    if conn:
+        st.success("🟢 Base de Données Connectée")
+        conn.close()
+    else:
+        st.error("🔴 Déconnecté")
 
 # --- PAGE 1 : TABLEAU DE BORD (Accueil) ---
 if menu == "📊 Tableau de Bord":
@@ -47,28 +59,37 @@ if menu == "📊 Tableau de Bord":
     
     conn = get_db_connection()
     if conn:
-        cur = conn.cursor()
-        
-        # Récupérer les stats
-        cur.execute("SELECT COUNT(*) FROM chantiers")
-        nb_chantiers = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM documents WHERE type_doc='DEVIS'")
-        nb_devis = cur.fetchone()[0]
-        
-        conn.close()
+        try:
+            cur = conn.cursor()
+            
+            # Vérification si les tables existent (pour éviter le crash au premier lancement)
+            cur.execute("CREATE TABLE IF NOT EXISTS chantiers (id SERIAL PRIMARY KEY, membre_id INTEGER, resume_texte TEXT, audio_url TEXT, date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            cur.execute("CREATE TABLE IF NOT EXISTS documents (id SERIAL PRIMARY KEY, membre_id INTEGER, type_doc TEXT, contenu_json TEXT, statut TEXT, date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            conn.commit()
 
-        # Affichage des chiffres clés
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Rapports Chantiers", nb_chantiers, "+2 ajd")
-        with col2:
-            st.metric("Devis en Attente", nb_devis, "Urgent")
-        with col3:
-            st.metric("Appels Reçus", "12", "-1")
+            # Récupérer les stats
+            cur.execute("SELECT COUNT(*) FROM chantiers")
+            nb_chantiers = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) FROM documents WHERE type_doc='DEVIS'")
+            nb_devis = cur.fetchone()[0]
+            
+            conn.close()
 
+            # Affichage des chiffres clés
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Rapports Chantiers", nb_chantiers)
+            with col2:
+                st.metric("Devis en Attente", nb_devis)
+            with col3:
+                st.metric("Appels Reçus", "En direct")
+
+        except Exception as e:
+            st.warning(f"Initialisation des tables... ({e})")
+    
     st.write("### 📅 Activité Récente")
-    st.info("Bienvenue Chef. L'IA a détecté 2 nouvelles demandes de devis ce matin.")
+    st.info("Bienvenue Chef. L'application est prête à recevoir les données.")
 
 # --- PAGE 2 : JOURNAL DE CHANTIER ---
 elif menu == "📞 Journal Chantiers":
@@ -76,19 +97,22 @@ elif menu == "📞 Journal Chantiers":
     
     conn = get_db_connection()
     if conn:
-        # On récupère les rapports
-        df = pd.read_sql("SELECT * FROM chantiers ORDER BY date_creation DESC", conn)
-        conn.close()
+        try:
+            df = pd.read_sql("SELECT * FROM chantiers ORDER BY date_creation DESC", conn)
+            conn.close()
 
-        for index, row in df.iterrows():
-            with st.container():
-                st.write(f"**📅 Date :** {row['date_creation']}")
-                st.success(f"📝 **Résumé IA :** {row['resume_texte']}")
-                if row['audio_url']:
-                    st.audio(row['audio_url'])
-                st.write("---")
-    else:
-        st.write("Aucune donnée.")
+            if not df.empty:
+                for index, row in df.iterrows():
+                    with st.container():
+                        st.write(f"**📅 Date :** {row['date_creation']}")
+                        st.success(f"📝 **Résumé IA :** {row['resume_texte']}")
+                        if row['audio_url']:
+                            st.audio(row['audio_url'])
+                        st.write("---")
+            else:
+                st.info("Aucun rapport de chantier pour le moment.")
+        except:
+            st.info("Table vide ou inexistante.")
 
 # --- PAGE 3 : DEVIS & FACTURES ---
 elif menu == "📝 Devis & Factures":
@@ -96,22 +120,28 @@ elif menu == "📝 Devis & Factures":
     
     conn = get_db_connection()
     if conn:
-        df = pd.read_sql("SELECT * FROM documents WHERE type_doc='DEVIS' ORDER BY date_creation DESC", conn)
-        conn.close()
+        try:
+            df = pd.read_sql("SELECT * FROM documents WHERE type_doc='DEVIS' ORDER BY date_creation DESC", conn)
+            conn.close()
 
-        st.dataframe(df[['date_creation', 'statut', 'contenu_json']])
-        
-        st.write("### 🔍 Détail du dernier devis")
-        if not df.empty:
-            dernier_devis = df.iloc[0]
-            st.json(dernier_devis['contenu_json'])
-            st.button("🖨️ Générer le PDF (Prochainement)")
+            if not df.empty:
+                st.dataframe(df[['date_creation', 'statut', 'contenu_json']])
+                st.write("### 🔍 Détail du dernier devis")
+                dernier_devis = df.iloc[0]
+                st.json(dernier_devis['contenu_json'])
+            else:
+                st.info("Aucun devis généré pour le moment.")
+        except:
+             st.info("Table vide.")
 
 # --- PAGE 4 : CLIENTS ---
 elif menu == "⚙️ Clients":
     st.markdown('<p class="main-header">👥 Répertoire Clients</p>', unsafe_allow_html=True)
     conn = get_db_connection()
     if conn:
-        df = pd.read_sql("SELECT nom_societe, telephone, email FROM membres", conn)
-        st.table(df)
-        conn.close()
+        try:
+            df = pd.read_sql("SELECT nom_societe, telephone FROM membres", conn)
+            st.table(df)
+            conn.close()
+        except:
+            st.warning("Aucun client trouvé ou table manquante.")
