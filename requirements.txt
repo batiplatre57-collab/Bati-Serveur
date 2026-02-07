@@ -4,3 +4,4 @@ psycopg2-binary
 requests
 signalwire
 google-generativeai
+protobuf==4.25.3
