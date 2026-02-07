@@ -10,7 +10,8 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 try:
-    DB_URL = os.environ.get('DATABASE_URL')
+    # On récupère les clés
+    DB_URL_RAW = os.environ.get('DATABASE_URL')
     GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 except KeyError:
     print("ERREUR : Il manque des clés dans les Secrets Render !")
@@ -51,18 +52,24 @@ FORMAT DE RÉPONSE OBLIGATOIRE (JSON) :
 }
 """
 
-# --- CONNEXION BDD (CORRIGÉE & SÉCURISÉE) ---
+# --- CONNEXION BDD (VERSION BLINDÉE 🛡️) ---
 def get_db_connection():
-    url = DB_URL
-    # Correction automatique pour Render qui donne parfois 'postgres://' au lieu de 'postgresql://'
+    url = DB_URL_RAW
+    
+    # 1. NETTOYAGE FORCÉ (On enlève 'psql' et les guillemets si présents)
+    if url:
+        url = url.replace("psql ", "").replace('"', "").replace("'", "").strip()
+
+    # 2. Correction du protocole (postgres -> postgresql)
     if url and url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
+        
     return psycopg2.connect(url)
 
 # --- ROUTES ---
 @app.route('/')
 def home():
-    return "⚡ BATI-SERVEUR (Version Google Gemini 1.5) en ligne."
+    return "⚡ BATI-SERVEUR (Version Blindée) en ligne."
 
 @app.route('/webhook/incoming', methods=['POST', 'GET'])
 def incoming_call():
@@ -74,13 +81,13 @@ def incoming_call():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # On nettoie le numéro (parfois +33, parfois 06...)
         cur.execute("SELECT nom_societe FROM membres WHERE telephone = %s", (caller_phone,))
         membre = cur.fetchone()
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"Erreur Connexion BDD au décrochage : {e}")
+        print(f"⚠️ Erreur BDD (Décrochage) : {e}")
+        # On continue même si la BDD plante, pour ne pas couper l'appel
         membre = None
 
     if membre:
@@ -88,7 +95,7 @@ def incoming_call():
     else:
         resp.say("Bonjour, entreprise Bati-Plâtre. Je vous écoute.", voice='alice', language='fr-FR')
 
-    # On enregistre et on envoie à l'IA
+    # On enregistre
     resp.record(action='/webhook/process-audio', maxLength=120, playBeep=True)
     return Response(str(resp), mimetype='text/xml')
 
@@ -96,41 +103,34 @@ def incoming_call():
 def process_audio():
     recording_url = request.values.get('RecordingUrl')
     caller_phone = request.values.get('From')
-    
-    reponse_vocale = "Bien reçu." # Valeur par défaut
+    reponse_vocale = "Bien reçu."
 
-    # 1. TÉLÉCHARGEMENT DE L'AUDIO
     audio_filename = "temp_audio.wav"
     try:
+        # 1. TÉLÉCHARGEMENT
         audio_data = requests.get(recording_url).content
         with open(audio_filename, "wb") as f:
             f.write(audio_data)
 
-        # 2. INTELLIGENCE GEMINI
+        # 2. IA GEMINI
         model = genai.GenerativeModel('gemini-1.5-flash')
         audio_file = genai.upload_file(path=audio_filename)
-        
-        # On demande l'analyse
         response = model.generate_content([SYSTEM_PROMPT, audio_file])
         
-        # 3. TRAITEMENT DE LA RÉPONSE
+        # 3. TRAITEMENT
         json_text = response.text.replace("```json", "").replace("```", "").strip()
         result = json.loads(json_text)
-        
         reponse_vocale = result.get('reponse_vocale', "C'est noté.")
 
-        # 4. SAUVEGARDE EN BDD
+        # 4. SAUVEGARDE BDD
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # On retrouve l'ID membre
         cur.execute("SELECT id FROM membres WHERE telephone = %s", (caller_phone,))
         membre = cur.fetchone()
         
         if membre:
             membre_id = membre[0]
             cat = result.get('categorie')
-            
             if cat == "JOURNAL":
                 cur.execute("INSERT INTO chantiers (membre_id, resume_texte, audio_url) VALUES (%s, %s, %s)", 
                             (membre_id, result['resume'], recording_url))
@@ -143,20 +143,17 @@ def process_audio():
         conn.close()
 
     except Exception as e:
-        print(f"ERREUR GENERALE: {e}")
-        reponse_vocale = "J'ai eu un petit souci technique, mais votre message est enregistré."
+        print(f"⚠️ ERREUR TRAITEMENT : {e}")
+        reponse_vocale = "J'ai eu un petit souci technique, mais l'audio est sauvegardé."
 
-    # 5. NETTOYAGE
+    # Nettoyage
     if os.path.exists(audio_filename):
         os.remove(audio_filename)
 
-    # 6. RÉPONSE AU TÉLÉPHONE
     resp = VoiceResponse()
     resp.say(reponse_vocale, voice='alice', language='fr-FR')
     resp.hangup()
-    
     return Response(str(resp), mimetype='text/xml')
 
 if __name__ == '__main__':
-    # Sur Render, c'est Gunicorn qui lance l'app, mais ceci est utile pour les tests locaux
     app.run(host='0.0.0.0', port=10000)
