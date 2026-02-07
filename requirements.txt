@@ -1,7 +1,6 @@
 flask
-google-generativeai
-psycopg2-binary
 gunicorn
-signalwire
+psycopg2-binary
 requests
-weasyprint
+signalwire
+google-generativeai
